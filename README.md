@@ -7,10 +7,10 @@ Uniswap v4 hook for **UHI11 — Active Management & Curation**. Depositors hold 
 [![Uniswap v4](https://img.shields.io/badge/Uniswap-v4%20hook-FF007A.svg?logo=uniswap)](https://docs.uniswap.org/contracts/v4/overview)
 [![Foundry](https://img.shields.io/badge/Built%20with-Foundry-FFDB1C.svg)](https://getfoundry.sh/)
 [![Solidity](https://img.shields.io/badge/Solidity-0.8.30-363636.svg?logo=solidity)](https://soliditylang.org/)
-[![Tests](https://img.shields.io/badge/tests-83%20passing-3FB950.svg)](#run-the-proofs)
+[![Tests](https://img.shields.io/badge/tests-89%20passing-3FB950.svg)](#run-the-proofs)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Badge check (this repo):** hook is `BaseHook` + v4 `PoolManager`; tooling is Foundry; `foundry.toml` pins `solc_version = "0.8.30"`; `forge test --match-contract 'Highwater|PriorArt|DemoScoreboard'` reports **83** passes (full `forge test`: **89**); `LICENSE` is MIT.
+**Badge check (this repo):** hook is `BaseHook` + v4 `PoolManager`; tooling is Foundry; `foundry.toml` pins `solc_version = "0.8.30"`; `forge test` reports **89 passed, 0 failed, 1 skipped** (the skip is the fork test without an RPC). The narrower judge filter `--match-contract 'Highwater|PriorArt|DemoScoreboard'` reports **83**; `LICENSE` is MIT.
 
 **Evidence box:** `backtest/` ships a real Unichain swap tape and an offline re-pricing suite. On the committed ~83-minute tape the fixed curated range does **not** beat random ranges (0.00 vs 2.15 WAD, z = −0.98); the negative result is published in [`backtest/report.txt`](backtest/report.txt). A 7-day archive tape is still needed before claiming skill.
 
@@ -178,7 +178,8 @@ keeper.updateHalfWidth(newHalfWidthSpacings)
 ```bash
 forge install
 forge build
-forge test --match-contract 'Highwater|PriorArt|DemoScoreboard'   # expect 83 passes (full suite: 89)
+forge test                                                       # expect 89 passed, 1 skipped (fork test)
+forge test --match-contract 'Highwater|PriorArt|DemoScoreboard'   # optional narrower filter: 83 passes
 ```
 
 Useful slices:
@@ -245,7 +246,7 @@ No addresses under `deployments/` are published in this repo yet.
 See [`docs/THREAT_MAP.md`](docs/THREAT_MAP.md).
 
 - Unaudited — do not put real funds in.
-- 83 judge-filtered Foundry tests (89 full suite) as listed above; invariants cover HWM, fee ≤ alpha (preview), dead shares, live shares ⇒ NAV > 0.
+- 89 Foundry tests passing (plus 1 fork test skipped without an RPC); invariants cover HWM, fee ≤ alpha (preview), dead shares, live shares ⇒ NAV > 0.
 - Fee math caps billable alpha; HWM only rises on a nonzero fee and uses post-dilution NAV/share.
 - Accrued swap fees are not paid entirely to the withdrawing user; they enter idle and are shared.
 - Performance pay is share minting to `curator`, not a `donate` to in-range LPs.
