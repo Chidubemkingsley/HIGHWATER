@@ -100,9 +100,9 @@ Cross-checked against two real-world exploits found during online research:
 | S3   | Keeper moves range to tick-free zone                                     | **v3**         | `HighwaterAudit.t.sol::test_S3_KeeperRangeDoesNotNeedToContainCurrentTick`       |
 | B1   | Bunni-class rounding (not vulnerable — confirmed by fuzz)                | **v4**         | `HighwaterAudit.t.sol::test_B1_FuzzPartialWithdrawsPreserveBobShare` (1024 runs) |
 | B2   | DAI vault zero-liquidity idle drain (not vulnerable — confirmed by test) | **v4**         | `HighwaterAudit.t.sol::test_B2_DustSharesGetProRataIdleNotFullBalance`           |
-| R18  | Mid-epoch benchmark freeze — curator paid for deposits not alpha         | **OPEN**       | No regression test yet. Fix: snapshot benchmark on every deposit/withdraw.        |
+| R18  | Mid-epoch benchmark freeze — curator paid for deposits not alpha         | **FIXED (v5)** | `_snapshotBenchmark()` runs on every deposit/withdrawal; `test/HighwaterP0.t.sol`. |
 | R19  | Non-standard token hazards (decimals fallback, FOT, rebasing, ERC-777, pausable) | **OPEN** | No regression test yet. Restrict to standard 18-decimal ERC-20s until resolved.  |
-| R20  | Donation-driven fee / HWM ratchet via permissionless settleEpoch         | **LOW / OPEN** | No code fix planned. Operational monitoring only.                                 |
+| R20  | Donation-driven fee / HWM ratchet via permissionless settleEpoch         | **MITIGATED**  | Direct transfers excluded by tracked idle + owner sweep; `poolManager.donate()` route remains LOW. |
 
 ---
 
@@ -114,7 +114,7 @@ The following items are known gaps, documented rather than hidden:
 
 2. **No fork test of the full deposit → rebalance → settle cycle** against a canonical `PoolManager` on Base/Unichain. `HighwaterForkSmoke.t.sol` currently only checks that the Base `PoolManager` address has bytecode.
 
-3. **`sqrtPriceX96` manipulation risk on thin pools.** The HODL benchmark and fee settlement both read `poolManager.getSlot0` directly. On a pool with very low liquidity a large swap can move the price significantly in one block. This is documented in the README risk notes. An oracle adapter (Uniswap v4 `StateView` TWAP or Chainlink) is a v2 consideration.
+3. **Production oracle not yet wired.** `IHighwaterOracle` + fail-closed settlement are shipped, but only a test spot stub exists in-tree. Production needs a real two-source adapter (push feed verified by a deep v3 TWAP) on the deployment chain.
 
 4. **No two-step owner / curator transfer.** `transferOwnership` and `setCurator` are single-step. A mistyped address can be corrected by the owner with another call, but the intermediate window is a trust surface.
 
@@ -130,7 +130,7 @@ The following items are known gaps, documented rather than hidden:
    - **Pausable / blacklistable tokens** (e.g. USDC, USDT): a frozen hook address causes `safeTransfer` to revert mid-withdrawal, locking all depositor funds until the freeze is lifted.
    Until an allowlist or deployer-validated token check is added, deployments **must** use standard 18-decimal, non-rebasing, non-fee-on-transfer ERC-20s.
 
-8. **Donation-driven fee / HWM ratchet (Threat 20 — LOW).** `settleEpoch` is permissionless. Anyone can transfer tokens directly to the hook to inflate `strategyNav`, then call `settleEpoch` to trigger a performance fee and ratchet the HWM upward, raising the bar for LPs' future fees. The attacker pays the donated tokens and gains nothing directly (bribe/grief, not a drain). No code fix planned; curator and owner should monitor for unexpected idle inflows between epoch open and close.
+8. **Donation-driven fee / HWM ratchet (Threat 20 — LOW).** Direct transfers are now excluded from NAV by internal idle accounting and recoverable by the owner. The `poolManager.donate()` + poke route remains; curator and owner should monitor for it.
 
 ---
 
@@ -142,7 +142,7 @@ forge test --match-contract HighwaterAudit -vv
 
 # Full suite
 forge test
-# expect 86 passes
+# expect 89 passes
 ```
 
 ---

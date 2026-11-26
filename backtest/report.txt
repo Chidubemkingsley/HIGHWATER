@@ -1,0 +1,11 @@
+tape: 1214 swaps, 3 epochs of 0.50h
+HIGHWATER curator fee: 0.00 WAD
+gross positive alpha:  101.34 WAD
+rho (fee / alpha):     0.0%
+static full-range LP fee: 0.00 WAD
+flat 5bp fee:             101.34 WAD
+random-range null: mean 2.15 WAD, z -0.98, wins 0/30
+null is published; no claim of skill is made if z <= 2.
+halfwidth 2 spacings: 0.00 WAD
+halfwidth 5 spacings: 0.00 WAD
+halfwidth 10 spacings: 0.00 WAD

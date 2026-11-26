@@ -16,3 +16,7 @@ docs/
 
 # Node modules
 node_modules/
+
+# Backtest fetch scratch (tape and report are committed)
+backtest/fetch.log
+backtest/fetch_state.json

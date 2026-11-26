@@ -1,12 +1,12 @@
 name: Test Suite
 
 on:
+  push:
+  pull_request:
   workflow_dispatch:
-  # push:
-  # pull_request:
 
 env:
-  FOUNDRY_PROFILE: ci
+  FOUNDRY_PROFILE: default
 
 jobs:
   test:
@@ -28,7 +28,10 @@ jobs:
           forge build --sizes
         id: build
 
-      - name: Test
-        run: |
-          forge test -vvv
+      - name: Test (local suites; fork tests skip without RPC)
+        run: forge test -vvv
         id: test
+
+      - name: Evidence suite (offline, committed tape)
+        run: python3 backtest/compare.py
+        id: evidence

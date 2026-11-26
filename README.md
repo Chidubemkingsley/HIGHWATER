@@ -7,10 +7,12 @@ Uniswap v4 hook for **UHI11 — Active Management & Curation**. Depositors hold 
 [![Uniswap v4](https://img.shields.io/badge/Uniswap-v4%20hook-FF007A.svg?logo=uniswap)](https://docs.uniswap.org/contracts/v4/overview)
 [![Foundry](https://img.shields.io/badge/Built%20with-Foundry-FFDB1C.svg)](https://getfoundry.sh/)
 [![Solidity](https://img.shields.io/badge/Solidity-0.8.30-363636.svg?logo=solidity)](https://soliditylang.org/)
-[![Tests](https://img.shields.io/badge/tests-89%20passing-3FB950.svg)](#run-the-proofs)
+[![Tests](https://img.shields.io/badge/tests-83%20passing-3FB950.svg)](#run-the-proofs)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Badge check (this repo):** hook is `BaseHook` + v4 `PoolManager`; tooling is Foundry; `foundry.toml` pins `solc_version = "0.8.30"`; `forge test --match-contract 'Highwater|PriorArt|DemoScoreboard'` reports **89** passes; `LICENSE` is MIT.
+**Badge check (this repo):** hook is `BaseHook` + v4 `PoolManager`; tooling is Foundry; `foundry.toml` pins `solc_version = "0.8.30"`; `forge test --match-contract 'Highwater|PriorArt|DemoScoreboard'` reports **83** passes (full `forge test`: **89**); `LICENSE` is MIT.
+
+**Evidence box:** `backtest/` ships a real Unichain swap tape and an offline re-pricing suite. On the committed ~83-minute tape the fixed curated range does **not** beat random ranges (0.00 vs 2.15 WAD, z = −0.98); the negative result is published in [`backtest/report.txt`](backtest/report.txt). A 7-day archive tape is still needed before claiming skill.
 
 **Honesty box:** unaudited research MVP. All scoreboards below are local Foundry against a test `PoolManager` (plus pure math). `HighwaterForkSmoke` — if you set `BASE_RPC_URL` — only asserts Base’s published `PoolManager` address has bytecode. It does not deploy HIGHWATER on a fork, and nothing here is a live testnet receipt or mainnet PnL claim.
 
@@ -176,7 +178,7 @@ keeper.updateHalfWidth(newHalfWidthSpacings)
 ```bash
 forge install
 forge build
-forge test --match-contract 'Highwater|PriorArt|DemoScoreboard'   # expect 89 passes
+forge test --match-contract 'Highwater|PriorArt|DemoScoreboard'   # expect 83 passes (full suite: 89)
 ```
 
 Useful slices:
@@ -190,6 +192,12 @@ forge test --match-contract HighwaterSwapAlpha -vv
 forge test --match-contract HighwaterThreatPoCs -vv
 forge test --match-contract HighwaterSecurity -vv
 forge test --match-contract HighwaterInvariant -vv
+
+# offline evidence suite over a committed real Unichain swap tape (see backtest/README.md)
+python3 backtest/compare.py
+
+# full fork cycle against canonical Unichain Sepolia PoolManager (skips without RPC)
+UNICHAIN_SEPOLIA_RPC_URL=<rpc> forge test --match-path 'test/fork/*' -vv
 
 # heavier invariant/fuzz profile from foundry.toml
 forge test --profile intense --match-contract Highwater -vv
@@ -237,12 +245,12 @@ No addresses under `deployments/` are published in this repo yet.
 See [`docs/THREAT_MAP.md`](docs/THREAT_MAP.md).
 
 - Unaudited — do not put real funds in.
-- 89 Foundry tests as listed above; invariants cover HWM, fee ≤ alpha (preview), dead shares, live shares ⇒ NAV > 0.
+- 83 judge-filtered Foundry tests (89 full suite) as listed above; invariants cover HWM, fee ≤ alpha (preview), dead shares, live shares ⇒ NAV > 0.
 - Fee math caps billable alpha; HWM only rises on a nonzero fee and uses post-dilution NAV/share.
 - Accrued swap fees are not paid entirely to the withdrawing user; they enter idle and are shared.
 - Performance pay is share minting to `curator`, not a `donate` to in-range LPs.
 - Only the hook may change the curated liquidity; `rebalance` is curator-gated; `keeperRebalance` is keeper-gated (only fires when tick is outside the active range); migration is owner-gated.
-- Marks read pool `sqrtPriceX96` — there is no price-oracle adapter in `src/`.
+- Settlement reads an `IHighwaterOracle` reference price when configured and fails closed (fee 0) when it is missing, reverting, zero, or spot-deviant beyond `priceDeviationBps`; `previewSettle` remains spot-based.
 - Owner/curator can still choose a harmful range or migrate curation; LPs’ recourse is withdraw.
 - Keeper can only call `keeperRebalance` when the tick is out of range, and the new range must contain the current tick (enforced on-chain) — a compromised keeper cannot move the position to a tick-free zone.
 - `migrateStrategy` with `doRebalance=true` refreshes the HODL benchmark to the post-migration inventory, preventing spurious alpha from a forced range change. (S2 fix.)

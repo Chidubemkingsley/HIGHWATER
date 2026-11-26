@@ -1,0 +1,12 @@
+{
+  "swaps": 1214,
+  "epochs": 3,
+  "epoch_seconds": 1800,
+  "curator_fee_wad": 0.0,
+  "alpha_wad": 101.34160081773422,
+  "null_mean_wad": 2.1500431350035836,
+  "null_z": -0.9813641574952257,
+  "null_wins": 0,
+  "static_full_range_wad": 0.0,
+  "flat_5bp_wad": 101.3416008177342
+}
