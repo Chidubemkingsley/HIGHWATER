@@ -1,0 +1,47 @@
+[profile.default]
+bytecode_hash = "none"
+evm_version = "cancun"
+ffi = true
+fs_permissions = [{access = "read-write", path = ".forge-snapshots/"}]
+libs = ["lib"]
+out = "out"
+solc_version = "0.8.30"
+src = "src"
+via_ir = false
+optimizer = true
+optimizer_runs = 200
+
+[lint]
+exclude_lints = ["screaming-snake-case-immutable", "screaming-snake-case-const"]
+lint_on_build = false
+
+# Default verification (fast enough for iteration)
+[fuzz]
+runs = 1024
+
+[invariant]
+runs = 64
+depth = 32
+fail_on_revert = false
+call_override = false
+
+# Heavy campaign: forge test --profile intense
+[profile.intense]
+bytecode_hash = "none"
+evm_version = "cancun"
+ffi = true
+libs = ["lib"]
+out = "out"
+solc_version = "0.8.30"
+src = "src"
+optimizer = true
+optimizer_runs = 200
+
+[profile.intense.fuzz]
+runs = 2048
+
+[profile.intense.invariant]
+runs = 256
+depth = 64
+fail_on_revert = false
+
