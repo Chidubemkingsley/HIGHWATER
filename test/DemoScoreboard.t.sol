@@ -39,6 +39,7 @@ contract DemoScoreboardTest is BaseTest {
         bytes memory ctor = abi.encode(poolManager, address(this), curator, EPOCH, uint16(2000), true);
         deployCodeTo("HighwaterHook.sol:HighwaterHook", ctor, address(flags));
         hook = HighwaterHook(payable(address(flags)));
+        _enableSpotOracle(hook);
 
         poolKey = PoolKey(currency0, currency1, 3000, 60, IHooks(address(hook)));
         poolManager.initialize(poolKey, Constants.SQRT_PRICE_1_1);
@@ -74,8 +75,8 @@ contract DemoScoreboardTest is BaseTest {
         console2.log("  curatorShares", curShares0);
         assertEq(fee0, 0);
 
-        // 4) Simulate outperformance (idle inventory lands after HODL snapshot)
-        MockERC20(Currency.unwrap(currency1)).mint(address(hook), 80e18);
+        // 4) Real outperformance via the v4 protocol (donation accrues to the position)
+        _donateToPool(poolKey, currency1, 80e18);
         console2.log("4 injected alpha strategyNav", hook.strategyNav());
         console2.log("  benchmarkNav", hook.benchmarkNav());
 

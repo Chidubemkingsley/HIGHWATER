@@ -81,6 +81,7 @@ contract HighwaterKeeperTest is BaseTest {
         bytes memory ctor = abi.encode(poolManager, address(this), curator, EPOCH, FEE_BPS, true);
         deployCodeTo("HighwaterHook.sol:HighwaterHook", ctor, address(flags));
         f.hook = HighwaterHook(payable(address(flags)));
+        _enableSpotOracle(f.hook);
 
         f.poolKey = PoolKey(currency0, currency1, 3000, TICK_SPACING, IHooks(address(f.hook)));
 

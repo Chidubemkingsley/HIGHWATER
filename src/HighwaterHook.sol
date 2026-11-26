@@ -25,6 +25,7 @@ import {SignedMath} from "@openzeppelin/contracts/utils/math/SignedMath.sol";
 
 import {NavLib} from "./libraries/NavLib.sol";
 import {HighwaterLib} from "./libraries/HighwaterLib.sol";
+import {IHighwaterOracle} from "./interfaces/IHighwaterOracle.sol";
 
 /// @title HIGHWATER
 /// @notice Curated Uniswap v4 liquidity vault where the curator earns a performance fee
@@ -61,6 +62,9 @@ contract HighwaterHook is BaseHook, ERC20, IUnlockCallback, ReentrancyGuardTrans
     /// @dev Max performance fee (50%).
     uint16 public constant MAX_FEE_BPS = 5_000;
 
+    /// @dev Hard ceiling on spot-vs-reference deviation at settlement (20%).
+    uint16 public constant MAX_PRICE_DEVIATION_BPS = 2_000;
+
     // ─────────────────────────────────────────────────────────────────────────
     // Errors
     // ─────────────────────────────────────────────────────────────────────────
@@ -84,6 +88,9 @@ contract HighwaterHook is BaseHook, ERC20, IUnlockCallback, ReentrancyGuardTrans
     error InvalidEpochDuration();
     error KeeperTickInRange();
     error UnsupportedCurrency();
+    error IdleUnderflow();
+    error NothingToSweep();
+    error InvalidOracle();
 
     // ─────────────────────────────────────────────────────────────────────────
     // Events
@@ -105,6 +112,9 @@ contract HighwaterHook is BaseHook, ERC20, IUnlockCallback, ReentrancyGuardTrans
         uint256 highWaterMark
     );
     event StrategyMigrated(address indexed oldCurator, address indexed newCurator, int24 tickLower, int24 tickUpper);
+    event UnexpectedSwept(address indexed token, address indexed to, uint256 amount);
+    event PriceOracleUpdated(address indexed oldOracle, address indexed newOracle);
+    event PriceDeviationUpdated(uint16 oldBps, uint16 newBps);
 
     // ─────────────────────────────────────────────────────────────────────────
     // Storage
@@ -127,13 +137,27 @@ contract HighwaterHook is BaseHook, ERC20, IUnlockCallback, ReentrancyGuardTrans
     uint8 public decimals1;
     bool public numeraireIsToken1;
 
+    /// @dev Optional settlement oracle. v4 has no built-in oracle; without one, settlement
+    ///      is fail-closed (zero fee) because spot price alone is manipulable.
+    IHighwaterOracle public priceOracle;
+    /// @dev Maximum tolerated spot-vs-reference sqrt-price deviation (bps). Default 5%.
+    uint16 public priceDeviationBps = 500;
+
     uint256 public epochId;
     uint256 public epochStartTimestamp;
     uint256 public highWaterMark; // NAV per share WAD
 
-    /// @dev HODL benchmark inventory snapshotted at epoch open (raw token units).
+    /// @dev HODL benchmark inventory, snapshotted at the last capital change (raw token units).
+    ///      A deposit or withdrawal refreshes it, so incoming capital can never be counted
+    ///      as curator alpha at settlement.
     uint256 public benchAmount0;
     uint256 public benchAmount1;
+
+    /// @dev Hook-owned idle inventory tracked internally. Unsolicited ERC-20 transfers or
+    ///      ETH sent to the hook are deliberately excluded: they must not move the share
+    ///      price or manufacture alpha at settlement.
+    uint256 private _idle0;
+    uint256 private _idle1;
 
     // Unlock callback ops
     uint8 private constant OP_DEPOSIT = 1;
@@ -259,7 +283,13 @@ contract HighwaterHook is BaseHook, ERC20, IUnlockCallback, ReentrancyGuardTrans
         return _poolKey;
     }
 
-    /// @notice Current strategy NAV in numéraire WAD (position + idle ERC-20 balances).
+    /// @notice Hook-owned idle inventory that is counted in NAV. Tokens transferred to the
+    ///         hook without going through the unlock path are excluded by design.
+    function idleBalances() external view returns (uint256 amount0, uint256 amount1) {
+        return (_idle0, _idle1);
+    }
+
+    /// @notice Current strategy NAV in numéraire WAD (position + tracked idle balances).
     function strategyNav() public view returns (uint256 navWad) {
         if (!bound) return 0;
         (uint256 amount0, uint256 amount1) = _inventory();
@@ -267,7 +297,8 @@ contract HighwaterHook is BaseHook, ERC20, IUnlockCallback, ReentrancyGuardTrans
         return NavLib.valueInNumeraire(amount0, amount1, sqrtPriceX96, numeraireIsToken1, decimals0, decimals1);
     }
 
-    /// @notice Unmanaged HODL benchmark NAV: epoch-start inventory marked at current pool price.
+    /// @notice Unmanaged HODL benchmark NAV: inventory at the last capital change, marked at
+    ///         the current pool price. Capital entering or leaving mid-epoch is not alpha.
     function benchmarkNav() public view returns (uint256 navWad) {
         if (!bound) return 0;
         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(boundId);
@@ -332,10 +363,9 @@ contract HighwaterHook is BaseHook, ERC20, IUnlockCallback, ReentrancyGuardTrans
 
         _mint(msg.sender, shares);
 
-        // If this is the first capital of the epoch (bench empty), open the HODL snapshot.
-        if (benchAmount0 == 0 && benchAmount1 == 0) {
-            _snapshotBenchmark();
-        }
+        // Rolling HODL snapshot: every capital change resets the benchmark to the inventory
+        // at that moment. Mid-epoch deposits can therefore never be counted as curator alpha.
+        _snapshotBenchmark();
 
         emit Deposited(msg.sender, shares, amount0, amount1, depositNav);
     }
@@ -376,14 +406,18 @@ contract HighwaterHook is BaseHook, ERC20, IUnlockCallback, ReentrancyGuardTrans
             );
         }
 
-        amount0 += _payoutIdle(msg.sender, _poolKey.currency0, shares, supply);
-        amount1 += _payoutIdle(msg.sender, _poolKey.currency1, shares, supply);
+        amount0 += _payoutIdle(msg.sender, true, shares, supply);
+        amount1 += _payoutIdle(msg.sender, false, shares, supply);
 
         // Remaining shareholders (incl. dead / curator) must retain positive NAV.
         // Floor rounding on tiny positions can otherwise leave shares claiming nothing.
         if (totalSupply() > 0 && strategyNav() == 0) revert ZeroLiquidity();
 
         if (amount0 < minAmount0 || amount1 < minAmount1) revert Slippage();
+
+        // Capital left the vault: reset the HODL benchmark so a withdrawal cannot
+        // manufacture alpha for the curator either.
+        _snapshotBenchmark();
 
         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(boundId);
         uint256 navOut =
@@ -490,14 +524,24 @@ contract HighwaterHook is BaseHook, ERC20, IUnlockCallback, ReentrancyGuardTrans
             );
         }
 
-        uint256 strategyNavWad = strategyNav();
-        uint256 benchmarkNavWad = benchmarkNav();
+        // Settlement price: reference oracle price if it is configured and agrees with spot.
+        // Otherwise the epoch is settled with fee 0 (fail closed) — never pay the curator
+        // on a price that could have been pushed by a single block of swaps.
+        (uint160 markPriceX96, bool trustedPrice) = _settlePrice();
+        (uint256 a0, uint256 a1) = _inventory();
+        uint256 strategyNavWad =
+            NavLib.valueInNumeraire(a0, a1, markPriceX96, numeraireIsToken1, decimals0, decimals1);
+        uint256 benchmarkNavWad = NavLib.valueInNumeraire(
+            benchAmount0, benchAmount1, markPriceX96, numeraireIsToken1, decimals0, decimals1
+        );
         uint256 supply = totalSupply();
 
         uint256 alphaWad;
-        uint256 newHwm;
-        (feeWad, newHwm, alphaWad) =
-            HighwaterLib.settleFee(strategyNavWad, benchmarkNavWad, supply, highWaterMark, performanceFeeBps);
+        uint256 newHwm = highWaterMark;
+        if (trustedPrice) {
+            (feeWad, newHwm, alphaWad) =
+                HighwaterLib.settleFee(strategyNavWad, benchmarkNavWad, supply, highWaterMark, performanceFeeBps);
+        }
 
         curatorShares = HighwaterLib.curatorSharesForFee(feeWad, strategyNavWad, supply);
         if (curatorShares > 0) {
@@ -513,6 +557,33 @@ contract HighwaterHook is BaseHook, ERC20, IUnlockCallback, ReentrancyGuardTrans
         }
         epochStartTimestamp = block.timestamp;
         _snapshotBenchmark();
+    }
+
+    /// @notice Owner sets the settlement oracle. Pass address(0) to disable (fees then 0).
+    function setPriceOracle(address newOracle) external onlyOwner {
+        if (newOracle != address(0) && newOracle.code.length == 0) revert InvalidOracle();
+        address old = address(priceOracle);
+        priceOracle = IHighwaterOracle(newOracle);
+        emit PriceOracleUpdated(old, newOracle);
+    }
+
+    /// @notice Owner sets the maximum spot-vs-reference deviation tolerated at settlement.
+    function setPriceDeviationBps(uint16 newBps) external onlyOwner {
+        if (newBps > MAX_PRICE_DEVIATION_BPS) revert InvalidFee();
+        uint16 old = priceDeviationBps;
+        priceDeviationBps = newBps;
+        emit PriceDeviationUpdated(old, newBps);
+    }
+
+    /// @notice Permissionless zero-delta `modifyLiquidity` poke: realises uncollected fees
+    ///         into tracked idle without settling an epoch. Useful for keepers and tests.
+    function poke() external nonReentrant {
+        if (!bound) revert PoolNotBound();
+        if (_positionLiquidity() > 0) {
+            poolManager.unlock(
+                abi.encode(OP_POKE, address(this), uint256(0), uint256(0), tickLower, tickUpper, uint128(0))
+            );
+        }
     }
 
     function transferOwnership(address newOwner) external onlyOwner {
@@ -535,6 +606,34 @@ contract HighwaterHook is BaseHook, ERC20, IUnlockCallback, ReentrancyGuardTrans
         address old = keeper;
         keeper = newKeeper;
         emit KeeperUpdated(old, newKeeper);
+    }
+
+    /// @notice Recover tokens sent to the hook outside the unlock path. Tracked idle
+    ///         inventory can never be swept: it belongs to the shareholders.
+    function sweepUnexpected(address token, address to) external onlyOwner {
+        if (to == address(0)) revert OnlyOwner();
+        uint256 unexpected;
+        if (token == address(0)) {
+            uint256 idleNative = 0;
+            if (_poolKey.currency0.isAddressZero()) idleNative = _idle0;
+            else if (_poolKey.currency1.isAddressZero()) idleNative = _idle1;
+            unexpected = address(this).balance - idleNative;
+            if (unexpected == 0) revert NothingToSweep();
+            (bool ok,) = to.call{value: unexpected}("");
+            require(ok, "ETH_TRANSFER");
+        } else {
+            uint256 balance = IERC20(token).balanceOf(address(this));
+            if (token == Currency.unwrap(_poolKey.currency0)) {
+                unexpected = balance > _idle0 ? balance - _idle0 : 0;
+            } else if (token == Currency.unwrap(_poolKey.currency1)) {
+                unexpected = balance > _idle1 ? balance - _idle1 : 0;
+            } else {
+                unexpected = balance;
+            }
+            if (unexpected == 0) revert NothingToSweep();
+            IERC20(token).safeTransfer(to, unexpected);
+        }
+        emit UnexpectedSwept(token, to, unexpected);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -589,8 +688,8 @@ contract HighwaterHook is BaseHook, ERC20, IUnlockCallback, ReentrancyGuardTrans
         );
 
         BalanceDelta principal = callerDelta - feesAccrued;
-        used0 = _settlePrincipalFrom(key.currency0, principal.amount0(), user);
-        used1 = _settlePrincipalFrom(key.currency1, principal.amount1(), user);
+        used0 = _settlePrincipalFrom(key, true, principal.amount0(), user);
+        used1 = _settlePrincipalFrom(key, false, principal.amount1(), user);
         _takeFeesToHook(key, feesAccrued);
     }
 
@@ -609,8 +708,8 @@ contract HighwaterHook is BaseHook, ERC20, IUnlockCallback, ReentrancyGuardTrans
         BalanceDelta principal = callerDelta - feesAccrued;
         // Fees stay with the vault (idle); only principal goes to the withdrawer.
         _takeFeesToHook(key, feesAccrued);
-        out0 = _takePrincipalTo(key.currency0, principal.amount0(), user);
-        out1 = _takePrincipalTo(key.currency1, principal.amount1(), user);
+        out0 = _takePrincipalTo(key, true, principal.amount0(), user);
+        out1 = _takePrincipalTo(key, false, principal.amount1(), user);
     }
 
     function _unlockPoke(PoolKey memory key, int24 tLower, int24 tUpper) internal {
@@ -626,8 +725,8 @@ contract HighwaterHook is BaseHook, ERC20, IUnlockCallback, ReentrancyGuardTrans
         // poke: principal should be ~0; take everything owed to the hook as idle.
         BalanceDelta principal = callerDelta - feesAccrued;
         _takeFeesToHook(key, feesAccrued);
-        _takePrincipalTo(key.currency0, principal.amount0(), address(this));
-        _takePrincipalTo(key.currency1, principal.amount1(), address(this));
+        _takePrincipalTo(key, true, principal.amount0(), address(this));
+        _takePrincipalTo(key, false, principal.amount1(), address(this));
     }
 
     function _unlockRebalance(PoolKey memory key, int24 newLower, int24 newUpper, uint128 oldLiq) internal {
@@ -652,13 +751,14 @@ contract HighwaterHook is BaseHook, ERC20, IUnlockCallback, ReentrancyGuardTrans
 
         BalanceDelta principal = callerDelta - feesAccrued;
         _takeFeesToHook(key, feesAccrued);
-        _takePrincipalTo(key.currency0, principal.amount0(), address(this));
-        _takePrincipalTo(key.currency1, principal.amount1(), address(this));
+        _takePrincipalTo(key, true, principal.amount0(), address(this));
+        _takePrincipalTo(key, false, principal.amount1(), address(this));
     }
 
     function _enterRangeFromHook(PoolKey memory key, int24 newLower, int24 newUpper) internal {
-        uint256 got0 = key.currency0.balanceOf(address(this));
-        uint256 got1 = key.currency1.balanceOf(address(this));
+        // Use tracked idle, not raw balances: unsolicited transfers are not vault assets.
+        uint256 got0 = _idle0;
+        uint256 got1 = _idle1;
 
         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(boundId);
         uint128 newLiq = NavLib.liquidityForAmounts(sqrtPriceX96, newLower, newUpper, got0, got1);
@@ -673,37 +773,64 @@ contract HighwaterHook is BaseHook, ERC20, IUnlockCallback, ReentrancyGuardTrans
         );
 
         BalanceDelta addPrincipal = addCaller - addFees;
-        _settlePrincipalFrom(key.currency0, addPrincipal.amount0(), address(this));
-        _settlePrincipalFrom(key.currency1, addPrincipal.amount1(), address(this));
+        _settlePrincipalFrom(key, true, addPrincipal.amount0(), address(this));
+        _settlePrincipalFrom(key, false, addPrincipal.amount1(), address(this));
         _takeFeesToHook(key, addFees);
+    }
+
+    function _currencyOf(PoolKey memory key, bool isToken0) private pure returns (Currency) {
+        return isToken0 ? key.currency0 : key.currency1;
+    }
+
+    function _creditIdle(bool isToken0, uint256 amount) private {
+        if (amount == 0) return;
+        if (isToken0) _idle0 += amount;
+        else _idle1 += amount;
+    }
+
+    function _debitIdle(bool isToken0, uint256 amount) private {
+        if (amount == 0) return;
+        if (isToken0) {
+            if (amount > _idle0) revert IdleUnderflow();
+            _idle0 -= amount;
+        } else {
+            if (amount > _idle1) revert IdleUnderflow();
+            _idle1 -= amount;
+        }
     }
 
     function _takeFeesToHook(PoolKey memory key, BalanceDelta feesAccrued) internal {
         // Fees are credits (non-negative). Cast via int256 like OZ BaseCustomAccounting.
         if (feesAccrued.amount0() > 0) {
-            key.currency0.take(poolManager, address(this), uint256(int256(feesAccrued.amount0())), false);
+            uint256 amount = uint256(int256(feesAccrued.amount0()));
+            _creditIdle(true, amount);
+            key.currency0.take(poolManager, address(this), amount, false);
         }
         if (feesAccrued.amount1() > 0) {
-            key.currency1.take(poolManager, address(this), uint256(int256(feesAccrued.amount1())), false);
+            uint256 amount = uint256(int256(feesAccrued.amount1()));
+            _creditIdle(false, amount);
+            key.currency1.take(poolManager, address(this), amount, false);
         }
     }
 
-    function _settlePrincipalFrom(Currency currency, int128 deltaAmount, address payer)
+    function _settlePrincipalFrom(PoolKey memory key, bool isToken0, int128 deltaAmount, address payer)
         internal
         returns (uint256 paid)
     {
         if (deltaAmount >= 0) return 0;
         paid = SignedMath.abs(int256(deltaAmount));
-        currency.settle(poolManager, payer, paid, false);
+        if (payer == address(this)) _debitIdle(isToken0, paid);
+        _currencyOf(key, isToken0).settle(poolManager, payer, paid, false);
     }
 
-    function _takePrincipalTo(Currency currency, int128 deltaAmount, address recipient)
+    function _takePrincipalTo(PoolKey memory key, bool isToken0, int128 deltaAmount, address recipient)
         internal
         returns (uint256 received)
     {
         if (deltaAmount <= 0) return 0;
         received = uint256(uint128(deltaAmount));
-        currency.take(poolManager, recipient, received, false);
+        if (recipient == address(this)) _creditIdle(isToken0, received);
+        _currencyOf(key, isToken0).take(poolManager, recipient, received, false);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -728,8 +855,10 @@ contract HighwaterHook is BaseHook, ERC20, IUnlockCallback, ReentrancyGuardTrans
         (liq,,) = poolManager.getPositionInfo(boundId, address(this), tickLower, tickUpper, POSITION_SALT);
     }
 
-    /// @dev Principal amounts in-range + uncollected fees (fee-growth) + idle ERC-20 balances.
+    /// @dev Principal amounts in-range + uncollected fees (fee-growth) + tracked idle balances.
     ///      Uncollected fees MUST count toward strategy NAV or curators are under-paid vs HODL.
+    ///      Raw token balances are deliberately not used: unsolicited transfers would
+    ///      inflate share price and create false alpha.
     function _inventory() internal view returns (uint256 amount0, uint256 amount1) {
         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(boundId);
         (uint128 liq, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128) =
@@ -750,8 +879,28 @@ contract HighwaterHook is BaseHook, ERC20, IUnlockCallback, ReentrancyGuardTrans
             }
         }
 
-        amount0 += _poolKey.currency0.balanceOf(address(this));
-        amount1 += _poolKey.currency1.balanceOf(address(this));
+        amount0 += _idle0;
+        amount1 += _idle1;
+    }
+
+    /// @dev Returns the reference price and whether it is safe to settle against.
+    ///      Fail-closed: missing, zero, reverting, or diverging references are untrusted.
+    function _settlePrice() internal view returns (uint160 markPriceX96, bool trusted) {
+        (uint160 spotX96,,,) = poolManager.getSlot0(boundId);
+        IHighwaterOracle oracle = priceOracle;
+        if (address(oracle) == address(0)) return (spotX96, false);
+
+        try oracle.getReferenceSqrtPriceX96(_poolKey) returns (uint160 referenceX96) {
+            if (referenceX96 == 0) return (spotX96, false);
+            uint256 diff = spotX96 > referenceX96
+                ? uint256(spotX96 - referenceX96)
+                : uint256(referenceX96 - spotX96);
+            // diff * BPS_DENOM <= reference * bps. Both sides fit uint256 (<= 2^174).
+            if (diff * 10_000 > uint256(referenceX96) * priceDeviationBps) return (spotX96, false);
+            return (referenceX96, true);
+        } catch {
+            return (spotX96, false);
+        }
     }
 
     function _snapshotBenchmark() internal {
@@ -760,17 +909,19 @@ contract HighwaterHook is BaseHook, ERC20, IUnlockCallback, ReentrancyGuardTrans
         benchAmount1 = a1;
     }
 
-    function _payoutIdle(address user, Currency currency, uint256 shares, uint256 supply)
+    function _payoutIdle(address user, bool isToken0, uint256 shares, uint256 supply)
         internal
         returns (uint256 paid)
     {
-        uint256 bal = currency.balanceOf(address(this));
+        uint256 bal = isToken0 ? _idle0 : _idle1;
         if (bal == 0 || supply == 0) return 0;
         // shares already burned — use supply = pre-burn supply passed in.
         paid = (bal * shares) / supply;
         // Keep ≥1 wei for remaining shareholders when any balance remains.
         if (shares < supply && paid > 0 && paid == bal) paid = bal - 1;
         if (paid == 0) return 0;
+        _debitIdle(isToken0, paid);
+        Currency currency = _currencyOf(_poolKey, isToken0);
         if (currency.isAddressZero()) {
             (bool ok,) = user.call{value: paid}("");
             require(ok, "ETH_TRANSFER");

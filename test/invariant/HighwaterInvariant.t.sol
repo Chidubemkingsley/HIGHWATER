@@ -48,6 +48,7 @@ contract HighwaterInvariantTest is StdInvariant, BaseTest {
         bytes memory ctor = abi.encode(poolManager, address(this), curator, uint32(1 days), uint16(2000), true);
         deployCodeTo("HighwaterHook.sol:HighwaterHook", ctor, address(flags));
         hook = HighwaterHook(payable(address(flags)));
+        _enableSpotOracle(hook);
 
         poolKey = PoolKey(currency0, currency1, 3000, 60, IHooks(address(hook)));
         poolManager.initialize(poolKey, Constants.SQRT_PRICE_1_1);

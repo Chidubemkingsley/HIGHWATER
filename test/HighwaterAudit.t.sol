@@ -46,6 +46,7 @@ contract HighwaterAuditTest is BaseTest {
         bytes memory ctor = abi.encode(poolManager, address(this), curator, EPOCH, FEE_BPS, true);
         deployCodeTo("HighwaterHook.sol:HighwaterHook", ctor, address(flags));
         hook = HighwaterHook(payable(address(flags)));
+        _enableSpotOracle(hook);
 
         poolKey = PoolKey(currency0, currency1, 3000, 60, IHooks(address(hook)));
         poolManager.initialize(poolKey, Constants.SQRT_PRICE_1_1);
@@ -361,6 +362,7 @@ contract HighwaterBSeriesAuditTest is BaseTest {
         bytes memory ctor = abi.encode(poolManager, address(this), curator, EPOCH, FEE_BPS, true);
         deployCodeTo("HighwaterHook.sol:HighwaterHook", ctor, address(flags));
         hook = HighwaterHook(payable(address(flags)));
+        _enableSpotOracle(hook);
 
         poolKey = PoolKey(currency0, currency1, 3000, 60, IHooks(address(hook)));
         poolManager.initialize(poolKey, Constants.SQRT_PRICE_1_1);
@@ -456,8 +458,9 @@ contract HighwaterBSeriesAuditTest is BaseTest {
         vm.prank(bob);
         hook.deposit(200e18, 200e18, 0);
 
-        // Add idle via token donation (simulate accrued fees simply).
-        MockERC20(Currency.unwrap(currency1)).mint(address(hook), 10e18);
+        // Real idle via a v4 donation, realised by a zero-delta poke.
+        _donateToPool(poolKey, currency1, 10e18);
+        hook.poke();
 
         uint256 slice = aliceShares / sliceDenom;
         if (slice == 0) slice = 1;
@@ -501,12 +504,14 @@ contract HighwaterBSeriesAuditTest is BaseTest {
         uint256 attackerShares = 1;
         uint256 supply = hook.totalSupply();
 
-        // Donate a large idle balance to the hook (simulates accumulated fees).
+        // Real idle via a v4 donation, realised by a zero-delta poke (accumulated fees).
         uint256 idleAmount = 500e18;
-        MockERC20(Currency.unwrap(currency1)).mint(address(hook), idleAmount);
+        _donateToPool(poolKey, currency1, idleAmount);
+        hook.poke();
 
         uint256 idleBefore = currency1.balanceOf(address(hook));
-        assertEq(idleBefore, idleAmount);
+        // v4's donate divides by liquidity with floor arithmetic; 1 wei of dust is expected.
+        assertApproxEqAbs(idleBefore, idleAmount, 1);
 
         // Attacker tries to withdraw their 1 share.
         // liqToRemove = (liq * 1) / supply = 0 (dust, floors to 0).
@@ -539,9 +544,10 @@ contract HighwaterBSeriesAuditTest is BaseTest {
         vm.prank(bob);
         hook.deposit(100e18, 100e18, 0);
 
-        // Donate tokens directly to simulate accumulated idle fees.
-        MockERC20(Currency.unwrap(currency0)).mint(address(hook), 50e18);
-        MockERC20(Currency.unwrap(currency1)).mint(address(hook), 50e18);
+        // Real idle via v4 donations, realised by a zero-delta poke.
+        _donateToPool(poolKey, currency0, 50e18);
+        _donateToPool(poolKey, currency1, 50e18);
+        hook.poke();
 
         uint256 supply = hook.totalSupply();
         uint256 halfAlice = aliceShares / 2;

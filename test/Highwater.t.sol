@@ -50,6 +50,7 @@ contract HighwaterTest is BaseTest {
         bytes memory ctor = abi.encode(poolManager, address(this), curator, EPOCH, FEE_BPS, true);
         deployCodeTo("HighwaterHook.sol:HighwaterHook", ctor, address(flags));
         hook = HighwaterHook(payable(address(flags)));
+        _enableSpotOracle(hook);
 
         poolKey = PoolKey(currency0, currency1, 3000, 60, IHooks(address(hook)));
         poolId = poolKey.toId();
@@ -223,8 +224,8 @@ contract HighwaterTest is BaseTest {
         uint256 bench = hook.benchmarkNav();
         assertGt(bench, 0);
 
-        // Air-drop token1 to the hook → strategy inventory rises, HODL bench does not.
-        MockERC20(Currency.unwrap(currency1)).mint(address(hook), 50e18);
+        // Real alpha via the v4 protocol: donate to the pool, realised into idle on poke.
+        _donateToPool(poolKey, currency1, 50e18);
 
         uint256 strategy = hook.strategyNav();
         assertGt(strategy, bench);

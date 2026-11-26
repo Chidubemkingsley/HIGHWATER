@@ -2,15 +2,15 @@
 
 **Managers don’t get paid for managing. They get paid for beating the LP they replaced.**
 
-Uniswap v4 hook for **UHI11 — Active Management & Curation**. Depositors hold ERC-20 vault shares (`HWTR`) while a curator sets the active tick range. When an epoch ends, `settleEpoch` marks the live book against a frozen HODL of epoch-start inventory (using the pool’s `sqrtPriceX96`). The curator earns fee shares only if that mark shows alpha **and** NAV per share clears a high-water mark.
+Uniswap v4 hook for **UHI11 — Active Management & Curation**. Depositors hold ERC-20 vault shares (`HWTR`) while a curator sets the active tick range. When an epoch ends, `settleEpoch` marks the live book against a HODL snapshot of the inventory at the last capital change (using the pool’s `sqrtPriceX96`). The curator earns fee shares only if that mark shows alpha **and** NAV per share clears a high-water mark. Capital entering or leaving mid-epoch is never counted as alpha.
 
 [![Uniswap v4](https://img.shields.io/badge/Uniswap-v4%20hook-FF007A.svg?logo=uniswap)](https://docs.uniswap.org/contracts/v4/overview)
 [![Foundry](https://img.shields.io/badge/Built%20with-Foundry-FFDB1C.svg)](https://getfoundry.sh/)
 [![Solidity](https://img.shields.io/badge/Solidity-0.8.30-363636.svg?logo=solidity)](https://soliditylang.org/)
-[![Tests](https://img.shields.io/badge/tests-83%20passing-3FB950.svg)](#run-the-proofs)
+[![Tests](https://img.shields.io/badge/tests-89%20passing-3FB950.svg)](#run-the-proofs)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Badge check (this repo):** hook is `BaseHook` + v4 `PoolManager`; tooling is Foundry; `foundry.toml` pins `solc_version = "0.8.30"`; `forge test --match-contract 'Highwater|PriorArt|DemoScoreboard'` reports **83** passes; `LICENSE` is MIT.
+**Badge check (this repo):** hook is `BaseHook` + v4 `PoolManager`; tooling is Foundry; `foundry.toml` pins `solc_version = "0.8.30"`; `forge test --match-contract 'Highwater|PriorArt|DemoScoreboard'` reports **89** passes; `LICENSE` is MIT.
 
 **Honesty box:** unaudited research MVP. All scoreboards below are local Foundry against a test `PoolManager` (plus pure math). `HighwaterForkSmoke` — if you set `BASE_RPC_URL` — only asserts Base’s published `PoolManager` address has bytecode. It does not deploy HIGHWATER on a fork, and nothing here is a live testnet receipt or mainnet PnL claim.
 
@@ -27,7 +27,7 @@ HIGHWATER’s pay rule is different:
 | Deposit / withdraw | Users move tokens through the hook; shares mint/burn (`deposit` / `withdraw`) |
 | Curate             | `rebalance` moves the single hook-owned range (`onlyCurator`)                 |
 | Clock              | After `epochDuration`, anyone may call `settleEpoch`                          |
-| Verdict            | `strategyNav` vs `benchmarkNav` (HODL snapshot) at live pool price            |
+| Verdict            | `strategyNav` vs `benchmarkNav` (rolling HODL snapshot) at live pool price   |
 | Pay                | Mint curator shares only on billable alpha above the high-water mark          |
 
 ```text
@@ -82,9 +82,11 @@ Hook flags used: `afterInitialize`, `beforeAddLiquidity`, `beforeRemoveLiquidity
 ## Vault behavior (what the hook does)
 
 - One shared concentrated position (`POSITION_SALT`). First deposit also mints `DEAD_SHARES` (1000) to `0xdead`.
-- `strategyNav` = position token amounts + fee-growth owed + ERC-20 idle on the hook, valued with `NavLib` from pool `sqrtPriceX96`.
-- `benchmarkNav` = epoch-start `(benchAmount0, benchAmount1)` valued the same way at the **current** price.
-- On `modifyLiquidity`, the unlock path splits `callerDelta` into principal vs `feesAccrued`: fees go to hook idle; principal is what the user pays or receives.
+- `strategyNav` = position token amounts + fee-growth owed + **internally tracked idle** (`idleBalances()`), valued with `NavLib` from pool `sqrtPriceX96`. Raw ERC-20/ETH balances are deliberately not used: unsolicited transfers cannot move share price or create fake alpha.
+- `benchmarkNav` = `(benchAmount0, benchAmount1)` snapshotted at the last deposit/withdrawal/settlement, valued the same way at the **current** price.
+- On `modifyLiquidity`, the unlock path splits `callerDelta` into principal vs `feesAccrued` (per the v4 `IPoolManager` reference): fees go to tracked idle; principal is what the user pays or receives.
+- `poke()` is permissionless: a zero-delta `modifyLiquidity` realises uncollected fees into tracked idle without settling an epoch.
+- `sweepUnexpected(token, to)` (owner-only) recovers tokens sent to the hook outside the unlock path; shareholder idle is never sweepable.
 - Withdraw: pro-rata liquidity + idle; will not empty the book while other shares remain; reverts if remaining supply would mark to zero NAV.
 
 Source: [`src/HighwaterHook.sol`](src/HighwaterHook.sol).
@@ -92,6 +94,8 @@ Source: [`src/HighwaterHook.sol`](src/HighwaterHook.sol).
 ---
 
 ## Settlement math (what earns the curator)
+
+**Settlement price is oracle-anchored.** v4 has no built-in oracle, so `setPriceOracle` wires an `IHighwaterOracle` adapter (production: a two-source feed, e.g. Chainlink-compatible price verified by a deep v3 TWAP). `settleEpoch` values the position and the HODL benchmark at the **reference price**, and checks spot against it; if the oracle is absent, reverts, returns zero, or deviates beyond `priceDeviationBps` (default 5%, cap 20%), the epoch settles with **fee = 0** — fail closed. `previewSettle()` remains spot-based and does not include the poke.
 
 On `settleEpoch` (when liquidity > 0 the hook first pokes with `liquidityDelta = 0` to realize fees into idle):
 
@@ -142,7 +146,7 @@ settleEpoch() → (feeWad, curatorShares)
 previewSettle() → (strategyNav, benchmarkNav, alpha, fee, curatorShares)  // view; does not poke
 
 // Views
-strategyNav() / benchmarkNav() / poolKey() / highWaterMark / epochId / keeper / …
+strategyNav() / benchmarkNav() / idleBalances() / poolKey() / highWaterMark / epochId / keeper / …
 ```
 
 Constructor: `PoolManager`, `owner`, `curator`, `epochDuration` (>0), `performanceFeeBps` (≤5000), `numeraireIsToken1`.
@@ -172,7 +176,7 @@ keeper.updateHalfWidth(newHalfWidthSpacings)
 ```bash
 forge install
 forge build
-forge test --match-contract 'Highwater|PriorArt|DemoScoreboard'   # expect 83 passes
+forge test --match-contract 'Highwater|PriorArt|DemoScoreboard'   # expect 89 passes
 ```
 
 Useful slices:
@@ -222,7 +226,7 @@ forge script script/00_DeployHighwater.s.sol \
   --broadcast
 ```
 
-Script mines CREATE2 for the three permission flags and deploys `HighwaterHook`. Env overrides: `CURATOR`, `EPOCH_DURATION`, `PERFORMANCE_FEE_BPS`, `NUMERAIRE_IS_TOKEN1`.
+Script mines CREATE2 for the three permission flags and deploys `HighwaterHook`. Env overrides: `CURATOR`, `EPOCH_DURATION`, `PERFORMANCE_FEE_BPS`, `NUMERAIRE_IS_TOKEN1`, `PRICE_ORACLE` (address of an `IHighwaterOracle` adapter; without it, settlement fees are fail-closed at zero).
 
 No addresses under `deployments/` are published in this repo yet.
 
@@ -233,7 +237,7 @@ No addresses under `deployments/` are published in this repo yet.
 See [`docs/THREAT_MAP.md`](docs/THREAT_MAP.md).
 
 - Unaudited — do not put real funds in.
-- 83 Foundry tests as listed above; invariants cover HWM, fee ≤ alpha (preview), dead shares, live shares ⇒ NAV > 0.
+- 89 Foundry tests as listed above; invariants cover HWM, fee ≤ alpha (preview), dead shares, live shares ⇒ NAV > 0.
 - Fee math caps billable alpha; HWM only rises on a nonzero fee and uses post-dilution NAV/share.
 - Accrued swap fees are not paid entirely to the withdrawing user; they enter idle and are shared.
 - Performance pay is share minting to `curator`, not a `donate` to in-range LPs.

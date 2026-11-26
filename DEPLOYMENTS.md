@@ -142,7 +142,7 @@ forge test --match-contract HighwaterAudit -vv
 
 # Full suite
 forge test
-# expect 79 passes
+# expect 86 passes
 ```
 
 ---
@@ -154,4 +154,6 @@ forge test
 | **v1**           | Initial hook + vault + settlement math. All T-series threats mitigated before first commit.                                                                                                                                                                                                                                 |
 | **v2**           | Added `HighwaterKeeper` auto-rebalance contract. Added `keeperRebalance` to hook with `setKeeper` admin. Added 12 keeper tests.                                                                                                                                                                                             |
 | **v3**           | Fixed S2: `migrateStrategy` now refreshes HODL benchmark after rebalance. Fixed S3: `keeperRebalance` now requires new range to contain current tick. Added `HighwaterAudit.t.sol` with 8 regression tests.                                                                                                                 |
-| **v4 (current)** | Cross-checked against two real-world exploits (Bunni V2 $8.4M rounding attack; DAI vault $14,838 zero-liquidity idle drain). Both attack patterns verified not applicable to HIGHWATER via 4 new tests including a 1024-run fuzz. `HighwaterAudit.t.sol` now contains `HighwaterBSeriesAuditTest`. Total: 83 tests passing. |
+| **v4**           | Cross-checked against two real-world exploits (Bunni V2 $8.4M rounding attack; DAI vault $14,838 zero-liquidity idle drain). Both attack patterns verified not applicable to HIGHWATER via 4 new tests including a 1024-run fuzz. `HighwaterAudit.t.sol` now contains `HighwaterBSeriesAuditTest`. |
+| **v5**           | Priority-0 hardening: idle inventory is tracked internally (`_idle0`/`_idle1`) so unsolicited transfers cannot inflate shares or create alpha; owner-only `sweepUnexpected` recovers them. HODL benchmark is snapshotted on every deposit/withdrawal. Added permissionless `poke()`. `optimizer_runs` lowered to 100 to stay under EIP-170. Three new P0 regressions in `test/HighwaterP0.t.sol`. |
+| **v6 (current)** | Oracle-anchored settlement: `IHighwaterOracle` adapter, owner-configurable `priceDeviationBps` (default 5%, cap 20%), `settleEpoch` values NAV at the reference price and fails closed (fee 0) when the oracle is missing/reverting/zero/divergent. Added `src/interfaces/IHighwaterOracle.sol`, test stub, and three fail-closed/bounds regressions. `via_ir = true` keeps the hook at 20,657 B (3,919 B EIP-170 margin). Total: 89 tests passing. |

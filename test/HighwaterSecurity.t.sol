@@ -35,6 +35,7 @@ contract HighwaterSecurityTest is BaseTest {
         bytes memory ctor = abi.encode(poolManager, address(this), curator, uint32(1 days), uint16(2000), true);
         deployCodeTo("HighwaterHook.sol:HighwaterHook", ctor, address(flags));
         hook = HighwaterHook(payable(address(flags)));
+        _enableSpotOracle(hook);
 
         poolKey = PoolKey(currency0, currency1, 3000, 60, IHooks(address(hook)));
         poolManager.initialize(poolKey, Constants.SQRT_PRICE_1_1);
@@ -47,7 +48,7 @@ contract HighwaterSecurityTest is BaseTest {
         vm.prank(alice);
         hook.deposit(100e18, 100e18, 0);
 
-        MockERC20(Currency.unwrap(currency1)).mint(address(hook), 20e18);
+        _donateToPool(poolKey, currency1, 20e18);
         vm.warp(block.timestamp + 1 days + 1);
         (uint256 fee1,) = hook.settleEpoch();
         assertGt(fee1, 0);
@@ -61,7 +62,7 @@ contract HighwaterSecurityTest is BaseTest {
         vm.prank(alice);
         hook.deposit(100e18, 100e18, 0);
 
-        MockERC20(Currency.unwrap(currency1)).mint(address(hook), 30e18);
+        _donateToPool(poolKey, currency1, 30e18);
         vm.warp(block.timestamp + 1 days + 1);
         (uint256 fee1, uint256 shares1) = hook.settleEpoch();
         assertGt(fee1, 0);
@@ -70,7 +71,7 @@ contract HighwaterSecurityTest is BaseTest {
 
         // New epoch, no new outperformance above HWM → fee 0 even if still > HODL.
         // Bench was resnapshotted including the idle; leave inventory alone.
-        vm.warp(block.timestamp + 1 days + 1);
+        vm.warp(hook.epochStartTimestamp() + 1 days + 1);
         (uint256 fee2, uint256 shares2) = hook.settleEpoch();
         assertEq(fee2, 0, "HWM must block repeat fee without new high");
         assertEq(shares2, 0);
@@ -132,7 +133,7 @@ contract HighwaterSecurityTest is BaseTest {
         vm.prank(alice);
         hook.deposit(200e18, 200e18, 0);
 
-        MockERC20(Currency.unwrap(currency1)).mint(address(hook), 50e18);
+        _donateToPool(poolKey, currency1, 50e18);
         uint256 nav = hook.strategyNav();
         uint256 supply = hook.totalSupply();
 

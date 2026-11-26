@@ -19,6 +19,7 @@ contract DeployHighwaterScript is BaseScript {
         uint32 epochDuration = uint32(vm.envOr("EPOCH_DURATION", uint256(1 days)));
         uint16 feeBps = uint16(vm.envOr("PERFORMANCE_FEE_BPS", uint256(2000)));
         bool numeraireIsToken1 = vm.envOr("NUMERAIRE_IS_TOKEN1", true);
+        address priceOracle = vm.envOr("PRICE_ORACLE", address(0));
 
         bytes memory constructorArgs =
             abi.encode(poolManager, owner_, curator_, epochDuration, feeBps, numeraireIsToken1);
@@ -31,6 +32,12 @@ contract DeployHighwaterScript is BaseScript {
             poolManager, owner_, curator_, epochDuration, feeBps, numeraireIsToken1
         );
         vm.stopBroadcast();
+
+        if (priceOracle != address(0)) {
+            vm.startBroadcast();
+            hook.setPriceOracle(priceOracle);
+            vm.stopBroadcast();
+        }
 
         require(address(hook) == hookAddress, "DeployHighwater: Hook Address Mismatch");
     }
