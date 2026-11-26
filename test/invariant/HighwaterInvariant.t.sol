@@ -92,10 +92,10 @@ contract HighwaterInvariantTest is StdInvariant, BaseTest {
     // ─── master invariants ───────────────────────────────────────────────────
 
     function invariant_highWaterMarkNeverDecreases() public view {
-        assertGe(hook.highWaterMark(), handler.ghostLastHwm(), "HWM decreased");
-        // ghostLastHwm is updated to current after each action, so equality is the steady state.
-        // The handler itself reverts on decrease mid-action; this is the post-call check.
-        assertGe(hook.highWaterMark(), HighwaterLib.WAD / 1000, "HWM collapsed near zero unexpectedly");
+        // HWM starts at 1.0 WAD and HighwaterLib never lowers it. The handler's
+        // _trackHwm() reverts on any observed decrease (discarding that action), so
+        // here we check the absolute floor rather than a self-updating ghost.
+        assertGe(hook.highWaterMark(), HighwaterLib.WAD, "HWM fell below its initial value");
     }
 
     function invariant_previewFeeNeverExceedsAlpha() public view {
@@ -123,10 +123,14 @@ contract HighwaterInvariantTest is StdInvariant, BaseTest {
     }
 
     function afterInvariant() public view {
-        // Anti-vacuity: seed deposit counts; prefer that the campaign also exercised paths.
+        // Anti-vacuity: the campaign must have exercised real actions, not just the seed.
         assertGt(hook.totalSupply(), 0, "vacuous: no shares");
-        // At least the seed deposit happened; ghostDeposits may be 0 if all fuzz deposits reverted.
-        assertEq(hook.balanceOf(address(0xdead)), 1000, "dead shares missing after campaign");
+        assertEq(hook.balanceOf(address(0xdead)), hook.DEAD_SHARES(), "dead shares missing after campaign");
+        assertGt(
+            handler.ghostDeposits() + handler.ghostSettles() + handler.ghostSwaps(),
+            0,
+            "vacuous: no fuzz actions succeeded"
+        );
     }
 
     function _fund(address who) internal {

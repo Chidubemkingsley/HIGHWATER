@@ -208,8 +208,10 @@ contract HighwaterTest is BaseTest {
         vm.prank(bob);
         (uint256 bobShares,,) = hook.deposit(100e18, 100e18, 0);
 
-        // Roughly similar deposits → roughly similar shares (allow slack for rounding / dead shares)
-        assertApproxEqRel(aliceShares + 1000, bobShares + aliceShares - bobShares + 1000, 0.15e18);
+        // First deposit burns DEAD_SHARES, so it minted `depositNav - 1000` shares.
+        // Bob deposits the same amount later at the same price and must receive
+        // approximately Alice's shares plus the dead shares.
+        assertApproxEqRel(bobShares, aliceShares + hook.DEAD_SHARES(), 0.001e18);
         assertGt(bobShares, 0);
         assertEq(hook.balanceOf(alice), aliceShares);
         assertEq(hook.balanceOf(bob), bobShares);

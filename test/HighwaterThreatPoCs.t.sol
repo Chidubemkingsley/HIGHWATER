@@ -136,19 +136,21 @@ contract HighwaterThreatPoCsTest is BaseTest {
             });
         }
 
-        uint256 idle0Before = currency0.balanceOf(address(hook));
-        uint256 idle1Before = currency1.balanceOf(address(hook));
+        (uint256 idle0Before, uint256 idle1Before) = hook.idleBalances();
 
         vm.prank(alice);
         hook.withdraw(aliceShares / 2, 0, 0);
 
-        // Either fees were already in idle, or withdraw poke realized more — peer side must remain.
+        // A half-exit by Alice must leave Bob's pro-rata claim on tracked idle intact.
+        (uint256 idle0After, uint256 idle1After) = hook.idleBalances();
+        uint256 sharesBurned = aliceShares / 2;
+        uint256 supplyAtExit = hook.totalSupply() + sharesBurned;
+        uint256 expectedIdle0Floor = (idle0Before * (supplyAtExit - sharesBurned)) / supplyAtExit;
+        uint256 expectedIdle1Floor = (idle1Before * (supplyAtExit - sharesBurned)) / supplyAtExit;
+        assertGe(idle0After + 1, expectedIdle0Floor, "[PoC] Alice drained Bob's token0 idle");
+        assertGe(idle1After + 1, expectedIdle1Floor, "[PoC] Alice drained Bob's token1 idle");
         assertGt(hook.strategyNav(), 0);
-        // Bob still fully invested.
         assertGt(hook.balanceOf(bob), 0);
-        // Idle should not be fully drained by a half-exit when fees accrued.
-        uint256 idleAfter = currency0.balanceOf(address(hook)) + currency1.balanceOf(address(hook));
-        assertTrue(idleAfter > 0 || idle0Before + idle1Before == 0 || hook.strategyNav() > 0);
     }
 
     function _value(uint256 amount0, uint256 amount1, uint160 sqrtPriceX96) internal view returns (uint256) {

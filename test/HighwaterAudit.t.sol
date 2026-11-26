@@ -201,30 +201,22 @@ contract HighwaterAuditTest is BaseTest {
         assertGt(hook.totalSupply(), 0);
     }
 
-    /// @notice S5b: If `strategyNav()` would be zero after a withdraw attempt,
-    ///         the transaction MUST revert and shares MUST be restored by the EVM.
-    ///         This can only happen if the NAV is somehow exactly zero — an extreme
-    ///         edge case that the invariant suite already covers. We document the
-    ///         expected behavior: the EVM revert rolls back the burn.
-    function test_S5b_RevertOnZeroNavRestoresSharesViaEVMRevert() public {
-        // The ZeroLiquidity guard at end of withdraw fires when:
-        // totalSupply() > 0 AND strategyNav() == 0
-        // This cannot happen in normal operation (invariant 4 covers it).
-        // We test that the guard is reachable by draining the pool externally
-        // then trying to withdraw. This should revert with ZeroLiquidity.
-        // Since shares are burned before the guard, the EVM revert restores them.
+    /// @notice S5b: a failed withdrawal must leave share balances and NAV untouched.
+    ///         The burn happens before the payout, so the EVM revert is what restores it.
+    function test_S5b_RevertRestoresShares() public {
         vm.prank(alice);
         (uint256 aliceShares,,) = hook.deposit(80e18, 80e18, 0);
 
-        // We cannot easily manufacture a zero-NAV state without bypassing the hook's
-        // guards, so we confirm the invariant holds in normal operation.
-        // strategyNav() must be > 0 as long as any liquidity exists.
-        assertGt(hook.strategyNav(), 0, "nav must be positive with active liquidity");
+        uint256 sharesBefore = hook.balanceOf(alice);
+        uint256 navBefore = hook.strategyNav();
 
-        // Alice can withdraw; nav stays positive due to dead shares' dust claim.
+        // Request more shares than owned: fails after the burn point in withdraw().
         vm.prank(alice);
-        hook.withdraw(aliceShares, 0, 0);
-        assertGt(hook.strategyNav(), 0, "nav must remain positive (dead shares hold residual)");
+        vm.expectRevert(HighwaterHook.InsufficientShares.selector);
+        hook.withdraw(aliceShares + 1, 0, 0);
+
+        assertEq(hook.balanceOf(alice), sharesBefore, "failed withdraw burned shares");
+        assertEq(hook.strategyNav(), navBefore, "failed withdraw changed NAV");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -403,13 +395,11 @@ contract HighwaterBSeriesAuditTest is BaseTest {
             });
         }
 
-        // Record idle before any withdrawals.
-        uint256 idle0Start = currency0.balanceOf(address(hook));
-        uint256 idle1Start = currency1.balanceOf(address(hook));
+        // Record tracked idle before any withdrawals.
+        (uint256 idle0Start, uint256 idle1Start) = hook.idleBalances();
+        uint256 supplyAtStart = hook.totalSupply();
 
         // Alice makes 10 micro-withdrawals of 1/100th of her shares each.
-        uint256 totalOut1 = 0;
-        uint256 totalOut0 = 0;
         uint256 slice = aliceShares / 100;
         require(slice > 0, "shares too small for test");
 
@@ -419,21 +409,18 @@ contract HighwaterBSeriesAuditTest is BaseTest {
             sharesToBurn = sharesToBurn > hook.balanceOf(alice) ? hook.balanceOf(alice) : sharesToBurn;
 
             vm.prank(alice);
-            (uint256 out0, uint256 out1) = hook.withdraw(sharesToBurn, 0, 0);
-            totalOut0 += out0;
-            totalOut1 += out1;
+            hook.withdraw(sharesToBurn, 0, 0);
         }
 
-        // B1 invariant: total idle extracted by Alice must not exceed her pro-rata
-        // share of idle at start (i.e. ~ half, since Alice and Bob deposited equally).
-        // We allow a generous 55% upper bound to account for Bob's later withdrawals
-        // contributing to idle — but Alice must not have drained more than she was owed.
-        uint256 aliceMaxIdle0 = (idle0Start * 55) / 100;
-        uint256 aliceMaxIdle1 = (idle1Start * 55) / 100;
-
-        // The idle component of Alice's out is bounded by her share of idle.
-        // We can't trivially separate principal from idle in the output, but we can
-        // assert the vault still has non-negative state for Bob.
+        // B1 invariant: Alice can only pull her pro-rata slice of tracked idle across all
+        // micro-withdrawals. Repeated rounding must accumulate in the vault, not in her favour.
+        (uint256 idle0After, uint256 idle1After) = hook.idleBalances();
+        uint256 maxIdleOut0 = (idle0Start * aliceShares) / supplyAtStart;
+        uint256 maxIdleOut1 = (idle1Start * aliceShares) / supplyAtStart;
+        uint256 floor0 = idle0Start > maxIdleOut0 ? idle0Start - maxIdleOut0 : 0;
+        uint256 floor1 = idle1Start > maxIdleOut1 ? idle1Start - maxIdleOut1 : 0;
+        assertGe(idle0After + 1, floor0, "[B1] token0 idle over-extracted");
+        assertGe(idle1After + 1, floor1, "[B1] token1 idle over-extracted");
         assertGt(hook.strategyNav(), 0, "[B1] vault NAV drained to zero by micro-withdrawals");
         assertGt(hook.balanceOf(bob), 0, "[B1] Bob's shares wiped by Alice's micro-withdrawals");
 
@@ -442,9 +429,6 @@ contract HighwaterBSeriesAuditTest is BaseTest {
         vm.prank(bob);
         (uint256 bobOut0, uint256 bobOut1) = hook.withdraw(bobShares, 0, 0);
         assertGt(bobOut0 + bobOut1, 0, "[B1] Bob got nothing after Alice's micro-withdrawals");
-
-        // Suppress unused variable warnings
-        (aliceMaxIdle0, aliceMaxIdle1, totalOut0, totalOut1);
     }
 
     /// @notice B1b: Fuzz — for any number of partial withdrawals, the last withdrawer
@@ -558,18 +542,17 @@ contract HighwaterBSeriesAuditTest is BaseTest {
         vm.prank(alice);
         (uint256 out0, uint256 out1) = hook.withdraw(halfAlice, 0, 0);
 
-        // B2b invariant: Alice's proportional claim on the whole vault (position + idle)
-        // is shares/supply. She must not receive MORE than that fraction of total NAV.
-        // Allow +1% slack for rounding.
-        uint256 maxFraction = (totalNavBefore * halfAlice) / supply;
-        uint256 actualNavOut = hook.strategyNav() == 0 ? 0 : out0 + out1; // rough
-
-        // Weak but meaningful check: vault still has ~half its value for the other half.
+        // B2b invariant: the value remaining in the vault must be at least the pro-rata
+        // claim of the shares that did not withdraw. In WAD NAV terms, Alice took her
+        // half of the supply, so the rest must retain at least the complementary fraction.
         uint256 remainingNav = hook.strategyNav();
-        // After Alice takes ~25% (half her share = quarter total), vault has ~75%.
-        assertGt(remainingNav, totalNavBefore / 2, "[B2b] vault lost too much value from pro-rata withdraw");
-
-        (aliceShares, maxFraction, actualNavOut, out0, out1);
+        uint256 expectedRemaining = (totalNavBefore * (supply - halfAlice)) / supply;
+        assertGe(
+            remainingNav + 1e15,
+            expectedRemaining,
+            "[B2b] vault lost more than Alice's pro-rata claim"
+        );
+        assertGt(out0 + out1, 0, "[B2b] withdraw returned nothing");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
